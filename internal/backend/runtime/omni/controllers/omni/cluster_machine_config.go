@@ -517,50 +517,102 @@ func rotateSecrets(cfg config.Provider, secrets *omni.ClusterSecrets, secretsBun
 		return nil, err
 	}
 
-	switch secretsRotation.TypedSpec().Value.Phase {
-	case specs.ClusterSecretsRotationStatusSpec_PRE_ROTATE:
-		cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
-			config.MachineConfig.MachineAcceptedCAs = append(
-				config.MachineConfig.MachineAcceptedCAs,
-				&x509.PEMEncodedCertificate{
-					Crt: rotateSecretsBundle.Certs.OS.Crt,
-				},
-			)
+	switch secrets.TypedSpec().Value.ComponentInRotation {
+	case specs.ClusterSecretsRotationStatusSpec_TALOS_CA:
+		switch secretsRotation.TypedSpec().Value.Phase {
+		case specs.ClusterSecretsRotationStatusSpec_PRE_ROTATE:
+			cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
+				config.MachineConfig.MachineAcceptedCAs = append(
+					config.MachineConfig.MachineAcceptedCAs,
+					&x509.PEMEncodedCertificate{
+						Crt: rotateSecretsBundle.Certs.OS.Crt,
+					},
+				)
 
-			return nil
-		})
-	case specs.ClusterSecretsRotationStatusSpec_ROTATE:
-		cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
-			config.MachineConfig.MachineAcceptedCAs = append(
-				config.MachineConfig.MachineAcceptedCAs,
-				&x509.PEMEncodedCertificate{
-					Crt: secretsBundle.Certs.OS.Crt,
-				},
-			)
-			config.MachineConfig.MachineAcceptedCAs = slices.DeleteFunc(config.Machine().Security().AcceptedCAs(), func(ca *x509.PEMEncodedCertificate) bool {
-				return bytes.Equal(ca.Crt, rotateSecretsBundle.Certs.OS.Crt)
+				return nil
 			})
+		case specs.ClusterSecretsRotationStatusSpec_ROTATE:
+			cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
+				config.MachineConfig.MachineAcceptedCAs = append(
+					config.MachineConfig.MachineAcceptedCAs,
+					&x509.PEMEncodedCertificate{
+						Crt: secretsBundle.Certs.OS.Crt,
+					},
+				)
+				config.MachineConfig.MachineAcceptedCAs = slices.DeleteFunc(config.Machine().Security().AcceptedCAs(), func(ca *x509.PEMEncodedCertificate) bool {
+					return bytes.Equal(ca.Crt, rotateSecretsBundle.Certs.OS.Crt)
+				})
 
-			if machineType.IsControlPlane() {
-				config.MachineConfig.MachineCA = rotateSecretsBundle.Certs.OS
-			} else {
-				config.MachineConfig.MachineCA = &x509.PEMEncodedCertificateAndKey{
-					Crt: rotateSecretsBundle.Certs.OS.Crt,
+				if machineType.IsControlPlane() {
+					config.MachineConfig.MachineCA = rotateSecretsBundle.Certs.OS
+				} else {
+					config.MachineConfig.MachineCA = &x509.PEMEncodedCertificateAndKey{
+						Crt: rotateSecretsBundle.Certs.OS.Crt,
+					}
 				}
-			}
 
-			return nil
-		})
-	case specs.ClusterSecretsRotationStatusSpec_POST_ROTATE:
-		cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
-			config.MachineConfig.MachineAcceptedCAs = slices.DeleteFunc(config.Machine().Security().AcceptedCAs(), func(ca *x509.PEMEncodedCertificate) bool {
-				return bytes.Equal(ca.Crt, rotateSecretsBundle.Certs.OS.Crt)
+				return nil
+			})
+		case specs.ClusterSecretsRotationStatusSpec_POST_ROTATE:
+			cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
+				config.MachineConfig.MachineAcceptedCAs = slices.DeleteFunc(config.Machine().Security().AcceptedCAs(), func(ca *x509.PEMEncodedCertificate) bool {
+					return bytes.Equal(ca.Crt, rotateSecretsBundle.Certs.OS.Crt)
+				})
+
+				return nil
 			})
 
-			return nil
-		})
+		case specs.ClusterSecretsRotationStatusSpec_OK: // nothing to do
+		}
 
-	case specs.ClusterSecretsRotationStatusSpec_OK: // nothing to do
+	case specs.ClusterSecretsRotationStatusSpec_KUBERNETES_CA:
+		switch secretsRotation.TypedSpec().Value.Phase {
+		case specs.ClusterSecretsRotationStatusSpec_PRE_ROTATE:
+			cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
+				config.ClusterConfig.ClusterAcceptedCAs = append(
+					config.ClusterConfig.ClusterAcceptedCAs,
+					&x509.PEMEncodedCertificate{
+						Crt: rotateSecretsBundle.Certs.K8s.Crt,
+					},
+				)
+
+				return nil
+			})
+		case specs.ClusterSecretsRotationStatusSpec_ROTATE:
+			cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
+				config.ClusterConfig.ClusterAcceptedCAs = append(
+					config.ClusterConfig.ClusterAcceptedCAs,
+					&x509.PEMEncodedCertificate{
+						Crt: secretsBundle.Certs.K8s.Crt,
+					},
+				)
+				config.ClusterConfig.ClusterAcceptedCAs = slices.DeleteFunc(config.Cluster().AcceptedCAs(), func(ca *x509.PEMEncodedCertificate) bool {
+					return bytes.Equal(ca.Crt, rotateSecretsBundle.Certs.K8s.Crt)
+				})
+
+				if machineType.IsControlPlane() {
+					config.ClusterConfig.ClusterCA = rotateSecretsBundle.Certs.K8s
+				} else {
+					config.ClusterConfig.ClusterCA = &x509.PEMEncodedCertificateAndKey{
+						Crt: rotateSecretsBundle.Certs.K8s.Crt,
+					}
+				}
+
+				return nil
+			})
+		case specs.ClusterSecretsRotationStatusSpec_POST_ROTATE:
+			cfg, err = cfg.PatchV1Alpha1(func(config *v1alpha1.Config) error {
+				config.ClusterConfig.ClusterAcceptedCAs = slices.DeleteFunc(config.Cluster().AcceptedCAs(), func(ca *x509.PEMEncodedCertificate) bool {
+					return bytes.Equal(ca.Crt, rotateSecretsBundle.Certs.K8s.Crt)
+				})
+
+				return nil
+			})
+
+		case specs.ClusterSecretsRotationStatusSpec_OK: // nothing to do
+		}
+
+	case specs.ClusterSecretsRotationStatusSpec_NONE: // nothing to do
 	}
 
 	return cfg, err

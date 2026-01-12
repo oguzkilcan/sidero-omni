@@ -185,6 +185,7 @@ export enum ClusterSecretsRotationStatusSpecPhase {
 export enum ClusterSecretsRotationStatusSpecComponent {
   NONE = 0,
   TALOS_CA = 1,
+  KUBERNETES_CA = 2,
 }
 
 export enum ClusterMachineSecretsRotationSpecStatus {
@@ -1004,4 +1005,7 @@ export type ClusterMachineSecretsRotationSpec = {
   phase?: ClusterSecretsRotationStatusSpecPhase
   status?: ClusterMachineSecretsRotationSpecStatus
   cluster_secrets_version?: string
+}
+
+export type RotateKubernetesCASpec = {
 }

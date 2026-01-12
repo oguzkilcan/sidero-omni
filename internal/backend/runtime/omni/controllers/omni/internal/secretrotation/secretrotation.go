@@ -18,11 +18,16 @@ import (
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/role"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/siderolabs/omni/client/api/omni/specs"
 	"github.com/siderolabs/omni/client/pkg/constants"
 	"github.com/siderolabs/omni/client/pkg/omni/resources/omni"
+	"github.com/siderolabs/omni/internal/backend/runtime/kubernetes"
 	"github.com/siderolabs/omni/internal/backend/runtime/talos"
+	"github.com/siderolabs/omni/internal/pkg/certs"
 )
 
 // Candidates is a list of candidates for rotation.
@@ -116,10 +121,12 @@ func (c Candidate) Less(other Candidate) bool {
 	return c.Hostname < other.Hostname
 }
 
-func (c Candidate) Validate(ctx context.Context, secrets *omni.ClusterSecrets, cmStatus *omni.ClusterMachineStatus) (bool, error) {
+func (c Candidate) Validate(ctx context.Context, secrets *omni.ClusterSecrets, lbConfig *omni.LoadBalancerConfig, cmStatus *omni.ClusterMachineStatus) (bool, error) {
 	switch secrets.TypedSpec().Value.ComponentInRotation {
 	case specs.ClusterSecretsRotationStatusSpec_TALOS_CA:
 		return c.validateTalosCARotation(ctx, secrets, cmStatus)
+	case specs.ClusterSecretsRotationStatusSpec_KUBERNETES_CA:
+		return c.validateKubernetesCARotation(ctx, secrets, lbConfig)
 	case specs.ClusterSecretsRotationStatusSpec_NONE:
 		// nothing to do
 	}
@@ -137,6 +144,41 @@ func (c Candidate) validateTalosCARotation(ctx context.Context, secrets *omni.Cl
 	_, err = talosClient.Version(ctx)
 	if err != nil {
 		return false, err
+	}
+
+	return true, nil
+}
+
+func (c Candidate) validateKubernetesCARotation(ctx context.Context, secrets *omni.ClusterSecrets, lbConfig *omni.LoadBalancerConfig) (bool, error) {
+	k8sClient, err := c.getKubernetesClient(secrets, lbConfig)
+	if err != nil {
+		return false, err
+	}
+	defer k8sClient.Close() //nolint:errcheck
+
+	clientset := k8sClient.Clientset()
+
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+
+	var notReadyNodes []string
+
+	for _, node := range nodes.Items {
+		for _, cond := range node.Status.Conditions {
+			if cond.Type == v1.NodeReady {
+				if cond.Status != v1.ConditionTrue {
+					notReadyNodes = append(notReadyNodes, node.Name)
+
+					break
+				}
+			}
+		}
+	}
+
+	if len(notReadyNodes) > 0 {
+		return false, fmt.Errorf("nodes not ready: %q", notReadyNodes)
 	}
 
 	return true, nil
@@ -182,6 +224,30 @@ func (c Candidate) getTalosClient(
 	return result, nil
 }
 
+func (c Candidate) getKubernetesClient(secrets *omni.ClusterSecrets, lbConfig *omni.LoadBalancerConfig) (*kubernetes.Client, error) {
+	clientCerts, ca, err := c.kubernetesAPIClientCertificateFromSecrets(secrets, constants.CertificateValidityTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Kubernetes API client certificate: %w", err)
+	}
+
+	kubeconfig, err := certs.GenerateKubeconfig(clientCerts, ca, lbConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Kubernetes API config: %w", err)
+	}
+
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Kubernetes API config: %w", err)
+	}
+
+	result, err := kubernetes.NewClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
+	}
+
+	return result, nil
+}
+
 func (c Candidate) talosAPIClientCertificateFromSecrets(secrets *omni.ClusterSecrets, certificateValidity time.Duration, roles role.Set) (*talosx509.PEMEncodedCertificateAndKey, []byte, error) {
 	secretsBundle, err := omni.ToSecretsBundle(secrets.TypedSpec().Value.GetData())
 	if err != nil {
@@ -217,6 +283,48 @@ func (c Candidate) talosAPIClientCertificateFromSecrets(secrets *omni.ClusterSec
 		}
 
 		return clientCert, secretsBundle.Certs.OS.Crt, nil
+	case specs.ClusterSecretsRotationStatusSpec_OK:
+		// nothing to do
+	}
+
+	return nil, nil, fmt.Errorf("unknown rotation phase: %s", secrets.TypedSpec().Value.RotationPhase.String())
+}
+
+func (c Candidate) kubernetesAPIClientCertificateFromSecrets(secrets *omni.ClusterSecrets, certificateValidity time.Duration) (*talosx509.PEMEncodedCertificateAndKey, []byte, error) {
+	secretsBundle, err := omni.ToSecretsBundle(secrets.TypedSpec().Value.GetData())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rotateSecretsBundle, err := omni.ToSecretsBundle(secrets.TypedSpec().Value.GetRotateData())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	switch secrets.TypedSpec().Value.RotationPhase {
+	case specs.ClusterSecretsRotationStatusSpec_PRE_ROTATE:
+		clientCert, certErr := certs.NewKubernetesCertificateAndKey(rotateSecretsBundle.Certs.K8s, certificateValidity)
+		if certErr != nil {
+			return nil, nil, fmt.Errorf("error generating Kubernetes API certificate: %w", certErr)
+		}
+
+		return clientCert, secretsBundle.Certs.K8s.Crt, nil
+
+	case specs.ClusterSecretsRotationStatusSpec_ROTATE:
+		clientCert, certErr := certs.NewKubernetesCertificateAndKey(rotateSecretsBundle.Certs.K8s, certificateValidity)
+		if certErr != nil {
+			return nil, nil, fmt.Errorf("error generating Kubernetes API certificate: %w", certErr)
+		}
+
+		return clientCert, rotateSecretsBundle.Certs.K8s.Crt, nil
+
+	case specs.ClusterSecretsRotationStatusSpec_POST_ROTATE:
+		clientCert, certErr := certs.NewKubernetesCertificateAndKey(secretsBundle.Certs.K8s, certificateValidity)
+		if certErr != nil {
+			return nil, nil, fmt.Errorf("error generating Kubernetes API certificate: %w", certErr)
+		}
+
+		return clientCert, secretsBundle.Certs.K8s.Crt, nil
 	case specs.ClusterSecretsRotationStatusSpec_OK:
 		// nothing to do
 	}

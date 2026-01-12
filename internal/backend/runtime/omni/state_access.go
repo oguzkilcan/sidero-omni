@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/siderolabs/omni/client/pkg/constants"
 	authres "github.com/siderolabs/omni/client/pkg/omni/resources/auth"
 	"github.com/siderolabs/omni/client/pkg/omni/resources/common"
 	"github.com/siderolabs/omni/client/pkg/omni/resources/infra"
@@ -54,6 +55,7 @@ var (
 		omni.ImportedClusterSecretsType,
 		omni.ClusterSecretsRotationStatusType,
 		omni.RotateTalosCAType,
+		omni.RotateKubernetesCAType,
 	})
 
 	// clusterLabelTypeSet is the set of resource types which have the related cluster's ID as a label.
@@ -278,6 +280,10 @@ func checkForRole(ctx context.Context, st state.State, access state.Access, clus
 		}
 	}
 
+	if constants.IsDebugBuild {
+		return nil
+	}
+
 	return filterAccess(ctx, access)
 }
 
@@ -447,6 +453,7 @@ func filterAccess(ctx context.Context, access state.Access) error {
 		omni.ClusterSecretsRotationStatusType,
 		omni.ClusterMachineSecretsRotationType,
 		omni.RotateTalosCAType,
+		omni.RotateKubernetesCAType,
 		system.ResourceLabelsType[*omni.MachineStatus](),
 		virtual.LabelsCompletionType,
 		virtual.SBCConfigType,

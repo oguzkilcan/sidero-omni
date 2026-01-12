@@ -64,4 +64,12 @@ const (
 	// RotateTalosCATimestamp indicates the time when CA rotation was completed.
 	// This annotation is set on the ClusterSecrets resource.
 	RotateTalosCATimestamp = SystemLabelPrefix + "rotate-talos-ca-timestamp"
+
+	// RotateKubernetesCAVersion is the version of RotateKubernetesCA resource.
+	// This annotation is set on the ClusterSecrets resource after the CA rotation is completed.
+	RotateKubernetesCAVersion = SystemLabelPrefix + "rotate-kubernetes-ca-version"
+
+	// RotateKubernetesCATimestamp indicates the time when CA rotation was completed.
+	// This annotation is set on the ClusterSecrets resource.
+	RotateKubernetesCATimestamp = SystemLabelPrefix + "rotate-kubernetes-ca-timestamp"
 )

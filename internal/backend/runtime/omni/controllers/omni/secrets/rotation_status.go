@@ -58,6 +58,9 @@ func NewSecretRotationStatusController() *SecretRotationStatusController {
 		qtransform.WithExtraMappedInput[*omni.ClusterMachineStatus](
 			mappers.MapByClusterLabel[*omni.ClusterSecrets](),
 		),
+		qtransform.WithExtraMappedInput[*omni.LoadBalancerConfig](
+			qtransform.MapperNone(),
+		),
 		qtransform.WithExtraMappedInput[*omni.ClusterStatus](
 			qtransform.MapperSameID[*omni.ClusterSecrets](),
 		),
@@ -79,6 +82,15 @@ func (ctrl *SecretRotationStatusController) reconcileRunning(
 	rotationStatus *omni.ClusterSecretsRotationStatus,
 ) error {
 	clusterStatus, err := safe.ReaderGetByID[*omni.ClusterStatus](ctx, r, clusterSecrets.Metadata().ID())
+	if err != nil {
+		if state.IsNotFoundError(err) {
+			return xerrors.NewTagged[qtransform.SkipReconcileTag](err)
+		}
+
+		return err
+	}
+
+	lbConfig, err := safe.ReaderGetByID[*omni.LoadBalancerConfig](ctx, r, clusterSecrets.Metadata().ID())
 	if err != nil {
 		if state.IsNotFoundError(err) {
 			return xerrors.NewTagged[qtransform.SkipReconcileTag](err)
@@ -117,7 +129,7 @@ func (ctrl *SecretRotationStatusController) reconcileRunning(
 	rotationsToUpdate := secretrotation.Candidates{}
 
 	for cmStatus := range cmStatuses.All() {
-		err = ctrl.processMachine(ctx, r, cmStatus, clusterSecrets, rotationStatus, secretRotationsMap, &rotationsToUpdate, &rotationsToDelete, &ongoingRotations)
+		err = ctrl.processMachine(ctx, r, logger, clusterSecrets, lbConfig, rotationStatus, cmStatus, secretRotationsMap, &rotationsToUpdate, &rotationsToDelete, &ongoingRotations)
 		if err != nil {
 			return err
 		}
@@ -184,6 +196,7 @@ func (ctrl *SecretRotationStatusController) reconcileRunning(
 		zap.Int("ongoing_rotations", ongoingRotations.Len()),
 		zap.Int("blocked", len(rotationsToUpdate.Blocked())),
 		zap.Int("not_ready", len(rotationsToUpdate.NotReady())),
+		zap.String("error", rotationStatus.TypedSpec().Value.Error),
 	)
 
 	// There are ongoing or recently submitted rotations, requeue until they are done
@@ -192,6 +205,10 @@ func (ctrl *SecretRotationStatusController) reconcileRunning(
 			func(res secretrotation.Candidate) string {
 				return res.MachineID
 			})))
+		ongoingRotation := ongoingRotations.Candidates[0]
+		rotationStatus.TypedSpec().Value.Status = fmt.Sprintf("rotation phase %s %d/%d",
+			clusterSecrets.TypedSpec().Value.RotationPhase.String(), cmStatuses.Len()-rotationsToUpdate.Len()+1, cmStatuses.Len())
+		rotationStatus.TypedSpec().Value.Step = fmt.Sprintf("rotating secret for machine: %s", ongoingRotation.Hostname)
 
 		return controller.NewRequeueInterval(time.Second)
 	}
@@ -256,9 +273,11 @@ func (ctrl *SecretRotationStatusController) reconcileTearingDown(ctx context.Con
 func (ctrl *SecretRotationStatusController) processMachine(
 	ctx context.Context,
 	r controller.ReaderWriter,
-	cmStatus *omni.ClusterMachineStatus,
+	logger *zap.Logger,
 	clusterSecrets *omni.ClusterSecrets,
+	lbConfig *omni.LoadBalancerConfig,
 	rotationStatus *omni.ClusterSecretsRotationStatus,
+	cmStatus *omni.ClusterMachineStatus,
 	secretRotationsMap map[resource.ID]*omni.ClusterMachineSecretsRotation,
 	rotationsToUpdate *secretrotation.Candidates,
 	rotationsToDelete *secretrotation.Candidates,
@@ -300,8 +319,9 @@ func (ctrl *SecretRotationStatusController) processMachine(
 
 	// ClusterMachineSecretsRotation is in progress, validate if the rotation phase is completed
 	if secretRotation.TypedSpec().Value.Status == specs.ClusterMachineSecretsRotationSpec_IN_PROGRESS {
-		valid, err := candidate.Validate(ctx, clusterSecrets, cmStatus)
+		valid, err := candidate.Validate(ctx, clusterSecrets, lbConfig, cmStatus)
 		if err != nil {
+			logger.Warn("failed to validate rotation candidate", zap.Error(err))
 			rotationStatus.TypedSpec().Value.Error = err.Error()
 		}
 

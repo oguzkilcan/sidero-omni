@@ -56,11 +56,7 @@ func PrepareConfig(logger *zap.Logger, params ...*config.Params) (*config.Params
 func Run(ctx context.Context, state *omni.State, config *config.Params, logger *zap.Logger) error {
 	talosClientFactory := talos.NewClientFactory(state.Default(), logger)
 	talosRuntime := talos.New(talosClientFactory, logger)
-
-	kubernetesRuntime, err := kubernetes.New(state.Default())
-	if err != nil {
-		return err
-	}
+	kubernetesRuntime := kubernetes.New(state.Default(), logger)
 
 	prometheus.MustRegister(talosClientFactory)
 	prometheus.MustRegister(kubernetesRuntime)
@@ -80,7 +76,10 @@ func Run(ctx context.Context, state *omni.State, config *config.Params, logger *
 	workloadProxyReconciler := workloadproxy.NewReconciler(logger.With(logging.Component("workload_proxy_reconciler")),
 		zapcore.DebugLevel, config.Services.WorkloadProxy.StopLBsAfter)
 
-	var resourceLogger *resourcelogger.Logger
+	var (
+		resourceLogger *resourcelogger.Logger
+		err            error
+	)
 
 	if len(config.Logs.ResourceLogger.Types) > 0 {
 		resourceLogger, err = resourcelogger.New(ctx, state.Default(), logger.With(logging.Component("resourcelogger")),

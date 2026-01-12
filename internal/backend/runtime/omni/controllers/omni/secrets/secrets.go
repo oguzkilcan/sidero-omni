@@ -64,7 +64,17 @@ func NewSecretsController(etcdBackupStoreFactory store.Factory) *SecretsControll
 
 					rotateTalosCAVersion, _ := secrets.Metadata().Annotations().Get(omni.RotateTalosCAVersion)
 					if rotateTalosCA != nil && rotateTalosCAVersion != rotateTalosCA.Metadata().Version().String() {
-						return ctrl.handleCARotation(ctx, r, logger, secrets, specs.ClusterSecretsRotationStatusSpec_TALOS_CA, rotateTalosCA.Metadata().Version().String())
+						return ctrl.handleCARotation(ctx, r, logger, secrets, cluster, specs.ClusterSecretsRotationStatusSpec_TALOS_CA, rotateTalosCA.Metadata().Version().String())
+					}
+
+					rotateKubernetesCA, err := safe.ReaderGetByID[*omni.RotateKubernetesCA](ctx, r, cluster.Metadata().ID())
+					if err != nil && !state.IsNotFoundError(err) {
+						return err
+					}
+
+					rotateKubernetesCAVersion, _ := secrets.Metadata().Annotations().Get(omni.RotateKubernetesCAVersion)
+					if rotateKubernetesCA != nil && rotateKubernetesCAVersion != rotateKubernetesCA.Metadata().Version().String() {
+						return ctrl.handleCARotation(ctx, r, logger, secrets, cluster, specs.ClusterSecretsRotationStatusSpec_KUBERNETES_CA, rotateKubernetesCA.Metadata().Version().String())
 					}
 
 					return nil
@@ -200,6 +210,9 @@ func NewSecretsController(etcdBackupStoreFactory store.Factory) *SecretsControll
 		qtransform.WithExtraMappedInput[*omni.RotateTalosCA](
 			qtransform.MapperSameID[*omni.Cluster](),
 		),
+		qtransform.WithExtraMappedInput[*omni.RotateKubernetesCA](
+			qtransform.MapperSameID[*omni.Cluster](),
+		),
 		qtransform.WithExtraMappedInput[*omni.ClusterSecretsRotationStatus](
 			qtransform.MapperSameID[*omni.Cluster](),
 		),
@@ -253,6 +266,7 @@ func (s *SecretsController) handleCARotation(
 	r controller.Reader,
 	logger *zap.Logger,
 	secrets *omni.ClusterSecrets,
+	cluster *omni.Cluster,
 	componentInRotation specs.ClusterSecretsRotationStatusSpec_Component,
 	rotationSourceVersion string,
 ) error {
@@ -276,14 +290,31 @@ func (s *SecretsController) handleCARotation(
 		}
 
 		if specs.ClusterSecretsRotationStatusSpec_TALOS_CA == componentInRotation {
-			talosCA, talosCAErr := talossecrets.NewTalosCA(talossecrets.NewFixedClock(time.Now()).Now())
-			if talosCAErr != nil {
-				return fmt.Errorf("failed to generate new Talos CA: %w", talosCAErr)
+			ca, caErr := talossecrets.NewTalosCA(talossecrets.NewFixedClock(time.Now()).Now())
+			if caErr != nil {
+				return fmt.Errorf("failed to generate new Talos CA: %w", caErr)
 			}
 
 			bundle.Certs.OS = &x509.PEMEncodedCertificateAndKey{
-				Crt: talosCA.CrtPEM,
-				Key: talosCA.KeyPEM,
+				Crt: ca.CrtPEM,
+				Key: ca.KeyPEM,
+			}
+		}
+
+		if specs.ClusterSecretsRotationStatusSpec_KUBERNETES_CA == componentInRotation {
+			versionContract, caErr := config.ParseContractFromVersion("v" + cluster.TypedSpec().Value.TalosVersion)
+			if caErr != nil {
+				return caErr
+			}
+
+			ca, caErr := talossecrets.NewKubernetesCA(talossecrets.NewFixedClock(time.Now()).Now(), versionContract)
+			if caErr != nil {
+				return fmt.Errorf("failed to generate new Kubernetes CA: %w", caErr)
+			}
+
+			bundle.Certs.K8s = &x509.PEMEncodedCertificateAndKey{
+				Crt: ca.CrtPEM,
+				Key: ca.KeyPEM,
 			}
 		}
 
@@ -330,6 +361,12 @@ func (s *SecretsController) handleCARotation(
 			secrets.Metadata().Annotations().Set(omni.RotateTalosCATimestamp, strconv.Itoa(int(time.Now().Unix())))
 			secrets.Metadata().Annotations().Set(omni.RotateTalosCAVersion, rotationSourceVersion)
 		}
+
+		if specs.ClusterSecretsRotationStatusSpec_KUBERNETES_CA == componentInRotation {
+			secrets.Metadata().Annotations().Set(omni.RotateKubernetesCATimestamp, strconv.Itoa(int(time.Now().Unix())))
+			secrets.Metadata().Annotations().Set(omni.RotateKubernetesCAVersion, rotationSourceVersion)
+		}
+
 	default:
 		return fmt.Errorf("unknown rotation phase: %s", rotationStatus.TypedSpec().Value.Phase.String())
 	}

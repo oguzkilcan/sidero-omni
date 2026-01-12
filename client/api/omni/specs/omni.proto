@@ -1473,6 +1473,7 @@ message ClusterSecretsRotationStatusSpec {
   enum Component {
     NONE = 0;
     TALOS_CA = 1;
+    KUBERNETES_CA = 2;
   }
 
   // Current rotation phase.
@@ -1504,3 +1505,6 @@ message ClusterMachineSecretsRotationSpec {
 
   string cluster_secrets_version = 3;
 }
+
+// RotateKubernetesCASpec is used to initiate Kubernetes CA rotation.
+message RotateKubernetesCASpec {}
